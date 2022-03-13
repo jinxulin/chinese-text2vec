@@ -22,6 +22,7 @@ def set_args():
     parser.add_argument('--num_epochs', default=10, type=int, help='训练几轮')
     parser.add_argument('--learning_rate', default=2e-5, type=float, help='学习率大小')
     parser.add_argument('--model', default='cosent', type=str, help='模型名称，可以是cosent或sbert')
+    parser.add_argument('--device', default='cuda', type=str, help='设备选择, cpu or cuda')
     return parser.parse_args()
 
 def run(args):
