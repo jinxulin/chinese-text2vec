@@ -3,42 +3,65 @@ import torch
 import numpy as np
 from scipy import stats
 from sklearn import metrics
+from tqdm import tqdm
 from torch.cuda import amp
 
-def cosent_loss(s1_vec, s2_vec, l):
-    cosine_sim = torch.cosine_similarity(s1_vec, s2_vec)
-    cosine_diff = cosine_sim[None, :] - cosine_sim[:, None]
-    labels = l[:, None] > l[None, :]
-    labels = labels.long()
-    cosine_diff = 20 * cosine_diff - (1 - labels) * 1e12
-    cosine_diff = torch.cat((torch.zeros(1).to(cosine_diff.device), cosine_diff.view(-1)), dim=0)
-    loss = torch.logsumexp(cosine_diff.view(-1), dim=0)
-    return loss
 
 def correct_predictions(s1_vec, s2_vec, label):
     output = torch.cosine_similarity(s1_vec, s2_vec)
     correct = ((output>0.5) == label).sum()
     return correct.item()
 
-def validate(model, dataloader):
+
+def train(model, loss_func, dataloader, optimizer, args):
+    start_time = time.time()
+    running_loss = 0
+    batch_time_avg = 0
+    tqdm_batch_iterator = tqdm(dataloader)
+    for batch_index, batch in enumerate(tqdm_batch_iterator):
+        model.zero_grad()
+        if args.device == 'cuda':
+            batch = tuple(t.cuda() for t in batch)
+        s1_input_ids, s2_input_ids, label = batch
+        if args.device == 'cuda' and args.enable_amp:
+            scaler = amp.GradScaler()
+            with amp.autocast():
+                s1_vec, s2_vec = model(s1_input_ids, s2_input_ids)
+                loss = loss_func(s1_vec, s2_vec, label)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            s1_vec, s2_vec = model(s1_input_ids, s2_input_ids)
+            loss = loss_func(s1_vec, s2_vec, label)
+            loss.backward()
+            optimizer.step()
+        running_loss += loss.item()
+        batch_time_avg = time.time() - start_time
+        description = "Running metrics on average. time: {:.4f}s, loss: {:.4f}".format(batch_time_avg / (batch_index + 1), running_loss / (batch_index + 1))
+        tqdm_batch_iterator.set_description(description)
+
+
+def validate(model, loss_func, dataloader, args):
     model.eval()
     epoch_start = time.time()
     running_loss = 0.0
     running_accuracy = 0.0
     all_prob = []
     all_labels = []
+    tqdm_batch_iterator = tqdm(dataloader)
     with torch.no_grad():
-        for batch in dataloader:
-            if torch.cuda.is_available():
+        for batch in tqdm_batch_iterator:
+            if args.device == 'cuda':
                 batch = tuple(t.cuda() for t in batch)
-                s1_input_ids, s2_input_ids, label = batch
+            s1_input_ids, s2_input_ids, label = batch
+            if args.device == 'cuda' and args.enable_amp:
                 with amp.autocast():
                     s1_vec, s2_vec = model(s1_input_ids, s2_input_ids)
-                    loss = cosent_loss(s1_vec, s2_vec, label)
+                    loss = loss_func(s1_vec, s2_vec, label)
             else:
-                s1_input_ids, s2_input_ids, label = batch
                 s1_vec, s2_vec = model(s1_input_ids, s2_input_ids)
-                loss = cosent_loss(s1_vec, s2_vec, label)
+                loss = loss_func(s1_vec, s2_vec, label)
             running_loss += loss.item()
             running_accuracy += correct_predictions(s1_vec, s2_vec, label)
             all_prob.extend(torch.cosine_similarity(s1_vec, s2_vec).detach().cpu().numpy())

@@ -6,23 +6,24 @@ from datetime import datetime
 from data import SentencePairDataset
 from model import *
 from runner import *
-from tqdm import tqdm
 from torch.utils.data import DataLoader
 from transformers import BertConfig, BertModel, BertTokenizer
 
 
 def set_args():
     parser = argparse.ArgumentParser('--使用transformers实现cosent')
-    parser.add_argument('--train_data_path', default='../data/train.csv', type=str, help='训练数据集')
-    parser.add_argument('--dev_data_path', default='../data/dev_test.csv', type=str, help='测试数据集')
+    parser.add_argument('--train_data_path', default='../data/train.tsv', type=str, help='训练数据集')
+    parser.add_argument('--dev_data_path', default='../data/dev.tsv', type=str, help='测试数据集')
     parser.add_argument('--pretrain_dir', default='../pretrain/', type=str, help='预训练模型模型位置')
     parser.add_argument('--train_batch_size', default=16, type=int, help='训练批次的大小')
     parser.add_argument('--dev_batch_size', default=16, type=int, help='验证批次的大小')
     parser.add_argument('--output_dir', default='../output/', type=str, help='模型输出目录')
     parser.add_argument('--num_epochs', default=10, type=int, help='训练几轮')
     parser.add_argument('--learning_rate', default=2e-5, type=float, help='学习率大小')
+    parser.add_argument('--truncate_len', default=32, type=int, help='文本截断的长度')
     parser.add_argument('--model', default='cosent', type=str, help='模型名称，可以是cosent或sbert')
     parser.add_argument('--device', default='cuda', type=str, help='设备选择, cpu or cuda')
+    parser.add_argument('--enable_amp', default=True, type=bool, help='启用混合精度加速')
     return parser.parse_args()
 
 def run(args):
@@ -35,12 +36,18 @@ def run(args):
     model = Model(pretrain_model)
     model.to(device)
 
+    # 损失函数初始化
+    if args.model == 'cosent':
+        loss_func = CoSENTLoss().to(device)
+    elif args.model == 'sbert':
+        loss_func = SBERTLoss(pretrain_config.hidden_size).to(device)
+
     # 数据加载
     df_train = pd.read_csv(args.train_data_path, sep='\t')
     df_dev = pd.read_csv(args.dev_data_path, sep='\t')
-    train_data = SentencePairDataset(tokenizer, df_train)
+    train_data = SentencePairDataset(tokenizer, df_train, max_len=args.truncate_len)
     train_loader = DataLoader(train_data, shuffle=True, batch_size=args.train_batch_size)
-    dev_data = SentencePairDataset(tokenizer, df_dev)
+    dev_data = SentencePairDataset(tokenizer, df_dev, max_len=args.truncate_len)
     dev_loader = DataLoader(dev_data, shuffle=False, batch_size=args.dev_batch_size)
 
     # 优化器设置
@@ -54,36 +61,12 @@ def run(args):
         'weight_decay':0.0
     }]
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
-    scaler = amp.GradScaler()
 
     for epoch in range(args.num_epochs):
-        start_time = time.time()
-        running_loss = 0
-        batch_time_avg = 0
-        tqdm_batch_iterator = tqdm(train_loader)
-        for batch_index, batch in enumerate(tqdm_batch_iterator):
-            model.zero_grad()
-            if torch.cuda.is_available():
-                batch = tuple(t.cuda() for t in batch)
-                s1_input_ids, s2_input_ids, label = batch
-                with amp.autocast():
-                    s1_vec, s2_vec = model(s1_input_ids, s2_input_ids)
-                    loss = cosent_loss(s1_vec, s2_vec, label)
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                s1_input_ids, s2_input_ids, label = batch
-                s1_vec, s2_vec = model(s1_input_ids, s2_input_ids)
-                loss = cosent_loss(s1_vec, s2_vec, label)
-                loss.backward()
-                optimizer.step()
-            running_loss += loss.item()
-            batch_time_avg = time.time() - start_time
-            description = "Running metrics on average. time: {:.4f}s, loss: {:.4f}".format(batch_time_avg / (batch_index + 1), running_loss / (batch_index + 1))
-            tqdm_batch_iterator.set_description(description)
+        print("* Train for epoch {}:".format(epoch))
+        train(model, loss_func, train_loader, optimizer, args)
         print("* Validation for epoch {}:".format(epoch))
-        epoch_time, epoch_loss, epoch_accuracy, epoch_auc, epoch_pearsonr = validate(model, dev_loader)
+        epoch_time, epoch_loss, epoch_accuracy, epoch_auc, epoch_pearsonr = validate(model, loss_func, dev_loader, args)
         result_info = "Valid metrics. time: {:.4f}s, loss: {:.4f}, accuracy: {:.4f}%, auc: {:.4f}, pearsonr: {:.4f}\n".format(epoch_time, epoch_loss, (epoch_accuracy * 100), epoch_auc, epoch_pearsonr)
         print(result_info)
         torch.save({"epoch": epoch,

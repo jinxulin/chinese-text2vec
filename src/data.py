@@ -15,8 +15,8 @@ class SentencePairDataset(Dataset):
         return self.seqs1[idx], self.seqs2[idx], self.labels[idx]
 
     def get_input(self, df):
-        sentences_1 = map(HanziConv.toSimplified, df['sentence1'].values)
-        sentences_2 = map(HanziConv.toSimplified, df['sentence2'].values)
+        sentences_1 = map(HanziConv.toSimplified, df['text_a'].values)
+        sentences_2 = map(HanziConv.toSimplified, df['text_b'].values)
         tokens_seq_1 = list(map(self.bert_tokenizer.encode, sentences_1))
         tokens_seq_2 = list(map(self.bert_tokenizer.encode, sentences_2))
         result = list(map(self.trunate_and_pad, tokens_seq_1, tokens_seq_2))
